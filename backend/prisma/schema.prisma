@@ -1,0 +1,260 @@
+// ============================================================
+// Hospital Management System - Database Schema
+// Using PostgreSQL for production. Swap provider to "sqlite"
+// only for local quick testing (see README).
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------
+// Users & Auth
+// ---------------------------------------------------------
+
+enum Role {
+  PATIENT
+  DOCTOR
+  ADMIN
+  RECEPTIONIST // reserved for phase 2
+  PHARMACIST   // reserved for phase 2
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+// Every human who logs into the system (patient or staff) has one User row.
+model User {
+  id           String   @id @default(cuid())
+  phone        String   @unique // primary login identifier (OTP based, common in India)
+  email        String?  @unique
+  passwordHash String? // used for staff (doctor/admin). Patients can use OTP login instead.
+  role         Role
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  patient Patient?
+  doctor  Doctor?
+
+  auditLogs AuditLog[]
+
+  @@index([role])
+}
+
+// Unique, human-friendly Hospital Patient ID (e.g. HOSP-2026-000123)
+// This is what the patient tells the pharmacy counter.
+model Patient {
+  id           String   @id @default(cuid())
+  patientCode  String   @unique // human-friendly ID shown on card / told at pharmacy
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id])
+
+  fullName     String
+  dob          DateTime?
+  gender       Gender?
+  bloodGroup   String?
+  address      String?
+  emergencyContact String?
+
+  allergies    String?  // free text, shown prominently on doctor dashboard
+  chronicConditions String? // e.g. Diabetes, Hypertension
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  appointments Appointment[]
+  visits       Visit[]
+  reports      Report[]
+  prescriptions Prescription[]
+
+  @@index([patientCode])
+}
+
+model Doctor {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id])
+
+  fullName     String
+  qualification String?
+  registrationNo String? // Medical council registration number
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id])
+  consultationFee Decimal? @db.Decimal(10,2)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  appointments Appointment[]
+  visits       Visit[]
+  prescriptions Prescription[]
+}
+
+model Department {
+  id      String   @id @default(cuid())
+  name    String   @unique // e.g. Cardiology, ENT, General Medicine
+  doctors Doctor[]
+  appointments Appointment[]
+}
+
+// ---------------------------------------------------------
+// Appointment / Token flow (the QR scan -> token number step)
+// ---------------------------------------------------------
+
+enum AppointmentStatus {
+  BOOKED
+  CHECKED_IN
+  IN_CONSULTATION
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+model Appointment {
+  id            String   @id @default(cuid())
+  tokenNumber   Int      // daily token number, resets each day per department
+  patientId     String
+  patient       Patient  @relation(fields: [patientId], references: [id])
+  doctorId      String?
+  doctor        Doctor?  @relation(fields: [doctorId], references: [id])
+  departmentId  String
+  department    Department @relation(fields: [departmentId], references: [id])
+
+  status        AppointmentStatus @default(BOOKED)
+  scheduledDate DateTime @default(now())
+  reasonNote    String? // optional short reason patient enters while booking
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  visit         Visit?
+
+  @@index([scheduledDate, departmentId])
+  @@index([patientId])
+}
+
+// ---------------------------------------------------------
+// Visit = the actual consultation record (created when doctor
+// opens the appointment). This is the core of "medical history".
+// ---------------------------------------------------------
+
+model Visit {
+  id            String   @id @default(cuid())
+  appointmentId String   @unique
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+
+  patientId     String
+  patient       Patient  @relation(fields: [patientId], references: [id])
+  doctorId      String
+  doctor        Doctor   @relation(fields: [doctorId], references: [id])
+
+  visitDate     DateTime @default(now())
+  chiefComplaint String  // "patient se uski problem puche"
+  diagnosis     String?
+  doctorNotes   String?
+
+  vitalsBP      String?
+  vitalsPulse   String?
+  vitalsTemp    String?
+  vitalsWeight  String?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  prescription  Prescription?
+  reports       Report[]
+
+  @@index([patientId, visitDate])
+}
+
+// ---------------------------------------------------------
+// Prescription -> sent to pharmacy (pharmacy dispensing UI is phase 2,
+// but schema below already supports it fully)
+// ---------------------------------------------------------
+
+enum PrescriptionStatus {
+  SENT_TO_PHARMACY
+  PARTIALLY_DISPENSED
+  DISPENSED
+  CANCELLED
+}
+
+model Medicine {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  genericName  String?
+  strength     String?  // e.g. "500mg"
+  form         String?  // Tablet / Syrup / Injection
+  stockQty     Int      @default(0) // used once pharmacy module is active
+
+  prescriptionItems PrescriptionItem[]
+}
+
+model Prescription {
+  id           String   @id @default(cuid())
+  visitId      String   @unique
+  visit        Visit    @relation(fields: [visitId], references: [id])
+
+  patientId    String
+  patient      Patient  @relation(fields: [patientId], references: [id])
+  doctorId     String
+  doctor       Doctor   @relation(fields: [doctorId], references: [id])
+
+  status       PrescriptionStatus @default(SENT_TO_PHARMACY)
+  createdAt    DateTime @default(now())
+
+  items        PrescriptionItem[]
+}
+
+model PrescriptionItem {
+  id             String   @id @default(cuid())
+  prescriptionId String
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id])
+  medicineId     String
+  medicine       Medicine @relation(fields: [medicineId], references: [id])
+
+  dosage         String   // "1-0-1"
+  durationDays   Int
+  instructions   String?  // "after food"
+}
+
+// ---------------------------------------------------------
+// Reports (lab results, scans etc shown in patient portal)
+// ---------------------------------------------------------
+
+model Report {
+  id         String   @id @default(cuid())
+  patientId  String
+  patient    Patient  @relation(fields: [patientId], references: [id])
+  visitId    String?
+  visit      Visit?   @relation(fields: [visitId], references: [id])
+
+  title      String   // "CBC Report", "Chest X-Ray"
+  fileUrl    String   // stored file path / S3 url
+  uploadedAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------
+// Audit log - mandatory for medical-record systems
+// ---------------------------------------------------------
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  action    String   // e.g. "VIEW_PATIENT_HISTORY", "CREATE_PRESCRIPTION"
+  entityId  String?
+  meta      String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
