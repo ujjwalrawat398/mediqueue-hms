@@ -19,7 +19,7 @@ async function nextPatientCode(): Promise<string> {
 
 function signToken(payload: object) {
   return jwt.sign(payload, process.env.JWT_SECRET as string, {
-    expiresIn: process.env.JWT_EXPIRES_IN || "8h",
+    expiresIn: (process.env.JWT_EXPIRES_IN || "8h") as jwt.SignOptions["expiresIn"],
   });
 }
 
